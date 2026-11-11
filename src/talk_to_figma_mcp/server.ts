@@ -6,6 +6,9 @@ import { z } from "zod";
 import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
 import { readFile } from "fs/promises";
+import { spawn } from "child_process";
+import { existsSync } from "fs";
+import { dirname, join } from "path";
 
 // Define TypeScript interfaces for Figma responses
 interface FigmaResponse {
@@ -2874,28 +2877,37 @@ function processFigmaNodeResponse(result: unknown): any {
 // Fork: matches FIXED_CHANNEL in the plugin's ui.html
 const DEFAULT_CHANNEL = process.env.FIGMA_CHANNEL ?? "prem";
 
-function connectToFigma(port: number = 3055) {
+// Fork: the relay reports how many Figma plugins are in the channel
+let pluginCount = 0;
+
+function connectToFigma(port: number = 3055): Promise<void> {
   // If already connected, do nothing
   if (ws && ws.readyState === WebSocket.OPEN) {
     logger.info('Already connected to Figma');
-    return;
+    return Promise.resolve();
   }
 
   const wsUrl = serverUrl === 'localhost' ? `${WS_URL}:${port}` : WS_URL;
   logger.info(`Connecting to Figma socket server at ${wsUrl}...`);
-  ws = new WebSocket(wsUrl);
+  const socket = new WebSocket(wsUrl);
+  ws = socket;
 
-  ws.on('open', () => {
+  let onOpened: () => void = () => {};
+  let onFailed: (error: Error) => void = () => {};
+  const opened = new Promise<void>((resolve, reject) => {
+    onOpened = resolve;
+    onFailed = reject;
+  });
+
+  socket.on('open', () => {
     logger.info('Connected to Figma socket server');
     // Reset channel on new connection
     currentChannel = null;
-    // Fork: the plugin always joins a fixed channel, so join it straight away
-    joinChannel(DEFAULT_CHANNEL).catch((error) =>
-      logger.error(`Auto-join of channel "${DEFAULT_CHANNEL}" failed: ${error instanceof Error ? error.message : String(error)}`)
-    );
+    pluginCount = 0;
+    onOpened();
   });
 
-  ws.on("message", (data: any) => {
+  socket.on("message", (data: any) => {
     try {
       // Define a more specific type with an index signature to allow any property access
       interface ProgressMessage {
@@ -2906,6 +2918,12 @@ function connectToFigma(port: number = 3055) {
       }
 
       const json = JSON.parse(data) as ProgressMessage;
+
+      // Fork: plugin presence from the relay
+      if (json.type === 'system' && typeof json.pluginCount === 'number') {
+        pluginCount = json.pluginCount;
+        return;
+      }
 
       // Handle progress updates
       if (json.type === 'progress_update') {
@@ -2979,13 +2997,16 @@ function connectToFigma(port: number = 3055) {
     }
   });
 
-  ws.on('error', (error) => {
+  socket.on('error', (error) => {
     logger.error(`Socket error: ${error}`);
+    onFailed(error);
   });
 
-  ws.on('close', () => {
+  socket.on('close', () => {
     logger.info('Disconnected from Figma socket server');
-    ws = null;
+    if (ws === socket) ws = null;
+    currentChannel = null;
+    pluginCount = 0;
 
     // Reject all pending requests
     for (const [id, request] of pendingRequests.entries()) {
@@ -2994,10 +3015,90 @@ function connectToFigma(port: number = 3055) {
       pendingRequests.delete(id);
     }
 
-    // Attempt to reconnect
-    logger.info('Attempting to reconnect in 2 seconds...');
-    setTimeout(() => connectToFigma(port), 2000);
+    // Fork: no automatic reconnect. The next Figma command connects again,
+    // so an idle relay can exit and sessions not using Figma stay quiet.
   });
+
+  return opened;
+}
+
+// Fork: start the relay as its own process so it outlives this session. Works
+// from src/talk_to_figma_mcp/server.ts and from dist/server.js.
+function startRelay(): void {
+  const scriptDir = dirname(process.argv[1] ?? "");
+  const relayPath = [join(scriptDir, "..", "socket.ts"), join(scriptDir, "..", "src", "socket.ts")]
+    .find((candidate) => existsSync(candidate));
+  if (!relayPath) {
+    throw new Error("Could not find the relay (socket.ts). Start it with `bun socket` from the repo.");
+  }
+
+  const bunPath = process.versions.bun ? process.execPath : "bun";
+  logger.info(`Starting relay: ${relayPath}`);
+  const relay = spawn(bunPath, ["run", relayPath], {
+    cwd: dirname(relayPath),
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+  });
+  relay.on("error", (error) => logger.error(`Could not start relay: ${error.message}`));
+  relay.unref();
+}
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Fork: connect to the relay, starting it first if nothing is listening
+async function ensureRelayConnection(): Promise<void> {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+
+  try {
+    await connectToFigma();
+    return;
+  } catch (error) {
+    if (serverUrl !== 'localhost') throw error;
+  }
+
+  startRelay();
+  const deadline = Date.now() + 5000;
+  while (true) {
+    await delay(250);
+    try {
+      await connectToFigma();
+      return;
+    } catch (error) {
+      if (Date.now() >= deadline) {
+        throw new Error("Could not start the Figma relay on port 3055.");
+      }
+    }
+  }
+}
+
+// Fork: the plugin retries every 2 seconds, so give it a moment to arrive
+async function waitForPlugin(): Promise<void> {
+  const deadline = Date.now() + 5000;
+  while (pluginCount === 0) {
+    if (Date.now() >= deadline) {
+      throw new Error("The Figma plugin isn't connected. Open LLM Figma MCP in the Figma file you want to work on, then try again.");
+    }
+    await delay(100);
+  }
+}
+
+async function prepareFigma(): Promise<void> {
+  await ensureRelayConnection();
+  if (!currentChannel) await joinChannel(DEFAULT_CHANNEL);
+  if (serverUrl === 'localhost') await waitForPlugin();
+}
+
+// Concurrent commands share one connection attempt
+let figmaReady: Promise<void> | null = null;
+
+function ensureFigmaReady(): Promise<void> {
+  if (!figmaReady) {
+    figmaReady = prepareFigma().finally(() => {
+      figmaReady = null;
+    });
+  }
+  return figmaReady;
 }
 
 // Function to join a channel
@@ -3022,11 +3123,20 @@ function sendCommandToFigma(
   params: unknown = {},
   timeoutMs: number = 30000
 ): Promise<unknown> {
+  // Fork: the first Figma command brings up the relay and connection
+  if (command === "join") return dispatchToFigma(command, params, timeoutMs);
+  return ensureFigmaReady().then(() => dispatchToFigma(command, params, timeoutMs));
+}
+
+function dispatchToFigma(
+  command: FigmaCommand,
+  params: unknown,
+  timeoutMs: number
+): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    // If not connected, try to connect first
-    if (!ws || ws.readyState !== WebSocket.OPEN) {
-      connectToFigma();
-      reject(new Error("Not connected to Figma. Attempting to connect..."));
+    const socket = ws;
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      reject(new Error("Not connected to Figma"));
       return;
     }
 
@@ -3074,7 +3184,7 @@ function sendCommandToFigma(
     // Send the request
     logger.info(`Sending command to Figma: ${command}`);
     logger.debug(`Request details: ${JSON.stringify(request)}`);
-    ws.send(JSON.stringify(request));
+    socket.send(JSON.stringify(request));
   });
 }
 
@@ -3419,6 +3529,7 @@ server.tool(
         };
       }
 
+      await ensureRelayConnection();
       await joinChannel(channel);
       return {
         content: [
@@ -3444,14 +3555,7 @@ server.tool(
 
 // Start the server
 async function main() {
-  try {
-    // Try to connect to Figma socket server
-    connectToFigma();
-  } catch (error) {
-    logger.warn(`Could not connect to Figma initially: ${error instanceof Error ? error.message : String(error)}`);
-    logger.warn('Will try to connect when the first command is sent');
-  }
-
+  // Fork: nothing connects at startup; the first Figma command does that
   // Start the MCP server with stdio transport
   const transport = new StdioServerTransport();
   await server.connect(transport);

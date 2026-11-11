@@ -31,7 +31,7 @@ The main server implementing the MCP protocol via `@modelcontextprotocol/sdk`. E
 ### WebSocket Relay (`src/socket.ts`)
 Lightweight Bun WebSocket server on port 3055 (configurable via `PORT` env). Routes messages between MCP server and Figma plugin using channel-based isolation. Clients call `join` to enter a channel; messages broadcast only within the same channel.
 
-### Figma Plugin (`src/cursor_mcp_plugin/`)
+### Figma Plugin (`src/llm_figma_plugin/`)
 Runs inside Figma. `code.js` is the plugin main thread handling 30+ commands via a dispatcher. `ui.html` is the plugin UI for WebSocket connection management. `manifest.json` declares permissions (dynamic-page access, localhost network). The plugin is **not built/bundled** — `code.js` is written directly as the runtime artifact.
 
 ## Key Patterns
@@ -40,12 +40,12 @@ Runs inside Figma. `code.js` is the plugin main thread handling 30+ commands via
 - **Logging**: All logs go to stderr. Stdout is reserved for MCP protocol messages.
 - **Timeouts**: 30s default per command. Progress updates from the plugin reset the inactivity timer.
 - **Chunking**: Large operations (scanning 100+ nodes) are chunked with progress updates to prevent Figma UI freezing.
-- **Reconnection**: WebSocket auto-reconnects after 2 seconds on disconnect.
+- **Reconnection**: the plugin retries every 2 seconds while its panel is open; the MCP server connects on the next Figma command.
 - **Zod validation**: All tool parameters are validated with Zod schemas.
 
 ## Fork: Local Additions
 
-This checkout is the fork `bakedpsyche/Claude-talk-to-figma-mcp`. `origin` is the fork (push here); `upstream` is `grab/cursor-talk-to-figma-mcp`, fetch only (its push URL is disabled on purpose). Pull upstream updates with `git fetch upstream && git merge upstream/main`, then push to `origin`. Never push to upstream.
+This checkout is the fork `bakedpsyche/llm-figma-mcp`. `origin` is the fork (push here); `upstream` is `grab/cursor-talk-to-figma-mcp`, fetch only (its push URL is disabled on purpose). Pull upstream updates with `git fetch upstream && git merge upstream/main`, then push to `origin`. Never push to upstream.
 
 Plugin commands added in `code.js` (Plugin API, no plan limits): `get_plugin_version`, `get_variables`, `create_variable`, `set_variable_value`, `set_variable_scopes`, `delete_variable`, `bind_variable`, `get_bound_variables`, `delete_style`, `execute_code`. Variables are found by id or by name (pass `collection` when a name exists in several); colour values are hex, and `{"alias": "<variable>"}` makes an alias. Each is also an MCP tool (registered through `pluginTool()` in `server.ts`, returning the plugin's JSON). Without the MCP server, send them with the relay client:
 
@@ -58,18 +58,20 @@ bun scripts/figma.ts bind_variable '{"nodeId":"1:2","variable":"text/on-dark-dis
 
 **Fixed channel:** the fork's plugin always joins channel `prem` (`FIXED_CHANNEL` in `ui.html`), and the script uses it by default (`FIGMA_CHANNEL` overrides). The relay listens on 127.0.0.1 only, so the name can't collide with other people; but every Figma file with the plugin open joins the same channel and receives each command, so keep the plugin open in one file at a time. The MCP server joins `prem` by itself on connect (`DEFAULT_CHANNEL` in `server.ts`), so `join_channel` isn't needed.
 
-**Claude Code runs the server from source**, the README's local-development form, so no build step: `claude mcp add -s user TalkToFigma -- bun <workspace>/Claude-talk-to-figma-mcp/src/talk_to_figma_mcp/server.ts`. Server changes load when Claude Code restarts; plugin changes hot-reload in Figma.
+**Claude Code runs the server from source**, the README's local-development form, so no build step: `claude mcp add -s user TalkToFigma -- bun <workspace>/llm-figma-mcp/src/talk_to_figma_mcp/server.ts`. Server changes load when Claude Code restarts; plugin changes hot-reload in Figma.
+
+**Relay on demand:** the first Figma command starts the relay as its own process if nothing is listening on 3055, then waits up to 5 seconds for the plugin. Sessions that don't use Figma never connect. The relay exits after 10 minutes with no plugin connected (`RELAY_IDLE_MINUTES`, 0 keeps it running). It refuses web pages by Origin: only `null` (Figma plugin UIs) and no Origin (the MCP server, `scripts/figma.ts`) get in. A sandboxed web page also sends `null`, so the idle exit still matters. `bun socket` still starts it by hand.
 
 **Build version:** `PLUGIN_VERSION` at the top of `code.js` (format `<upstream version>-prem.<n>`) is shown in the plugin panel header and returned by `get_plugin_version`. Bump it on every plugin change, so the running build can be told apart. A panel without a "Build:" line is an upstream or Community build.
 
-The plugin running in Figma must be the dev plugin linked from this checkout's `src/cursor_mcp_plugin/manifest.json`; the Community build answers "Unknown command".
+The plugin running in Figma must be the dev plugin linked from this checkout's `src/llm_figma_plugin/manifest.json`; the Community build answers "Unknown command".
 
 ## Setup
 
 1. Run `bun setup` — installs dependencies and writes MCP config for both Cursor (`.cursor/mcp.json`) and Claude Code (`.mcp.json`)
-2. `bun socket` in one terminal (WebSocket relay)
-3. In Figma: Plugins → Development → Link existing plugin → select `src/cursor_mcp_plugin/manifest.json`
-4. Run plugin in Figma, join a channel, then use tools from Cursor or Claude Code
+2. Nothing to start: the relay comes up on the first Figma command
+3. In Figma: Plugins → Development → Link existing plugin → select `src/llm_figma_plugin/manifest.json`
+4. Run the plugin in Figma (it connects by itself), then use the tools from any MCP client
 
 The MCP config written by `bun setup` uses the published package:
 

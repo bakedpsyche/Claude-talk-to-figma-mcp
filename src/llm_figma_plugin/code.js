@@ -1,4 +1,4 @@
-// This is the main code file for the Cursor MCP Figma plugin
+// This is the main code file for the LLM Figma MCP plugin
 // It handles Figma API commands
 
 // Plugin state
@@ -55,29 +55,11 @@ async function sendProgressUpdate(
 }
 
 // Fork build version: bump on every change to this plugin (shown in the UI header)
-const PLUGIN_VERSION = "0.3.5-prem.5";
+const PLUGIN_VERSION = "0.3.5-prem.6";
 
 // Show UI
 figma.showUI(__html__, { width: 350, height: 600 });
 figma.ui.postMessage({ type: "plugin-version", version: PLUGIN_VERSION });
-
-// Initialize anonymous analytics client_id (persisted via clientStorage)
-(async () => {
-  try {
-    let clientId = await figma.clientStorage.getAsync("analyticsClientId");
-    if (!clientId) {
-      clientId =
-        Date.now().toString(36) +
-        "-" +
-        Math.random().toString(36).slice(2, 10) +
-        Math.random().toString(36).slice(2, 10);
-      await figma.clientStorage.setAsync("analyticsClientId", clientId);
-    }
-    figma.ui.postMessage({ type: "analytics-client-id", clientId });
-  } catch (e) {
-    console.error("analytics init failed:", e);
-  }
-})();
 
 // Plugin commands from UI
 figma.ui.onmessage = async (msg) => {
