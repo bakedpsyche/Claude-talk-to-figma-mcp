@@ -103,7 +103,7 @@ bun socket
 
 1. Start the WebSocket server
 2. Install the MCP server in Cursor
-3. Open Figma and run the Cursor MCP Plugin
+3. Open Figma and run the LLM Figma MCP plugin
 4. Connect the plugin to the WebSocket server by joining a channel using `join_channel`
 5. Use Cursor to communicate with Figma using the MCP tools
 
