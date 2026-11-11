@@ -55,7 +55,7 @@ async function sendProgressUpdate(
 }
 
 // Fork build version: bump on every change to this plugin (shown in the UI header)
-const PLUGIN_VERSION = "0.3.5-prem.4";
+const PLUGIN_VERSION = "0.3.5-prem.5";
 
 // Show UI
 figma.showUI(__html__, { width: 350, height: 600 });
