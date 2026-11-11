@@ -7,7 +7,7 @@ https://github.com/user-attachments/assets/129a14d2-ed73-470f-9a4c-2240b2a4885c
 ## Project Structure
 
 - `src/talk_to_figma_mcp/` - TypeScript MCP server for Figma integration
-- `src/cursor_mcp_plugin/` - Figma plugin for communicating with Cursor
+- `src/llm_figma_plugin/` - Figma plugin for communicating with Cursor
 - `src/socket.ts` - WebSocket server that facilitates communication between the MCP server and Figma plugin
 
 ## How to use
@@ -75,7 +75,7 @@ bun socket
 
 1. In Figma, go to Plugins > Development > New Plugin
 2. Choose "Link existing plugin"
-3. Select the `src/cursor_mcp_plugin/manifest.json` file
+3. Select the `src/llm_figma_plugin/manifest.json` file
 4. The plugin should now be available in your Figma development plugins
 
 ## Windows + WSL Guide
@@ -221,7 +221,7 @@ The MCP server includes several helper prompts to guide you through complex desi
 1. Navigate to the Figma plugin directory:
 
    ```
-   cd src/cursor_mcp_plugin
+   cd src/llm_figma_plugin
    ```
 
 2. Edit code.js and ui.html
