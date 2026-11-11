@@ -5,7 +5,49 @@ import { Server, ServerWebSocket } from "bun";
 // Store clients by channel
 const channels = new Map<string, Set<ServerWebSocket<any>>>();
 
+// Fork: the relay exits after this long with no Figma plugin connected, so it
+// only runs while it is in use. RELAY_IDLE_MINUTES=0 keeps it running.
+const parsedIdleMinutes = Number(process.env.RELAY_IDLE_MINUTES ?? 10);
+const IDLE_MINUTES = Number.isFinite(parsedIdleMinutes) ? parsedIdleMinutes : 10;
+let pluginClients = 0;
+let idleTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleIdleExit() {
+  if (IDLE_MINUTES <= 0 || idleTimer) return;
+  idleTimer = setTimeout(() => {
+    console.log(`No Figma plugin connected for ${IDLE_MINUTES} minutes, exiting`);
+    process.exit(0);
+  }, IDLE_MINUTES * 60_000);
+}
+
+function cancelIdleExit() {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = null;
+}
+
+// Fork: tells the MCP server whether a plugin is in the channel, so a command
+// can fail fast with a useful message instead of timing out.
+function publishPluginCount(channelName: string) {
+  const clients = channels.get(channelName);
+  if (!clients) return;
+  const pluginCount = [...clients].filter((client) => client.data?.isPlugin).length;
+  const payload = JSON.stringify({
+    type: "system",
+    message: "Plugin presence",
+    channel: channelName,
+    pluginCount,
+  });
+  clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) client.send(payload);
+  });
+}
+
 function handleConnection(ws: ServerWebSocket<any>) {
+  if (ws.data?.isPlugin) {
+    pluginClients++;
+    cancelIdleExit();
+  }
+
   // Don't add to clients immediately - wait for channel join
   console.log("New client connected");
 
@@ -54,11 +96,21 @@ const server = Bun.serve({
       });
     }
 
+    // Fork: browsers always send Origin on a WebSocket handshake, and a page's
+    // origin is its site. Figma plugin UIs send "null"; the MCP server and
+    // scripts send none. Anything else is a web page, which must not get in.
+    const origin = req.headers.get("Origin");
+    if (origin !== null && origin !== "null") {
+      console.warn(`Rejected connection from origin: ${origin}`);
+      return new Response("Forbidden", { status: 403 });
+    }
+
     // Handle WebSocket upgrade
     const success = server.upgrade(req, {
       headers: {
         "Access-Control-Allow-Origin": "*",
       },
+      data: { isPlugin: origin === "null" },
     });
 
     if (success) {
@@ -133,6 +185,7 @@ const server = Bun.serve({
               }));
             }
           });
+          publishPluginCount(channelName);
           return;
         }
 
@@ -201,11 +254,17 @@ const server = Bun.serve({
     },
     close(ws: ServerWebSocket<any>) {
       // Remove client from their channel
-      channels.forEach((clients) => {
-        clients.delete(ws);
+      channels.forEach((clients, channelName) => {
+        if (clients.delete(ws)) publishPluginCount(channelName);
       });
+
+      if (ws.data?.isPlugin) {
+        pluginClients = Math.max(0, pluginClients - 1);
+        if (pluginClients === 0) scheduleIdleExit();
+      }
     }
   }
 });
 
 console.log(`WebSocket server running on port ${server.port}`);
+scheduleIdleExit();

@@ -40,7 +40,7 @@ Runs inside Figma. `code.js` is the plugin main thread handling 30+ commands via
 - **Logging**: All logs go to stderr. Stdout is reserved for MCP protocol messages.
 - **Timeouts**: 30s default per command. Progress updates from the plugin reset the inactivity timer.
 - **Chunking**: Large operations (scanning 100+ nodes) are chunked with progress updates to prevent Figma UI freezing.
-- **Reconnection**: WebSocket auto-reconnects after 2 seconds on disconnect.
+- **Reconnection**: the plugin retries every 2 seconds while its panel is open; the MCP server connects on the next Figma command.
 - **Zod validation**: All tool parameters are validated with Zod schemas.
 
 ## Fork: Local Additions
@@ -60,6 +60,8 @@ bun scripts/figma.ts bind_variable '{"nodeId":"1:2","variable":"text/on-dark-dis
 
 **Claude Code runs the server from source**, the README's local-development form, so no build step: `claude mcp add -s user TalkToFigma -- bun <workspace>/Claude-talk-to-figma-mcp/src/talk_to_figma_mcp/server.ts`. Server changes load when Claude Code restarts; plugin changes hot-reload in Figma.
 
+**Relay on demand:** the first Figma command starts the relay as its own process if nothing is listening on 3055, then waits up to 5 seconds for the plugin. Sessions that don't use Figma never connect. The relay exits after 10 minutes with no plugin connected (`RELAY_IDLE_MINUTES`, 0 keeps it running). It refuses web pages by Origin: only `null` (Figma plugin UIs) and no Origin (the MCP server, `scripts/figma.ts`) get in. A sandboxed web page also sends `null`, so the idle exit still matters. `bun socket` still starts it by hand.
+
 **Build version:** `PLUGIN_VERSION` at the top of `code.js` (format `<upstream version>-prem.<n>`) is shown in the plugin panel header and returned by `get_plugin_version`. Bump it on every plugin change, so the running build can be told apart. A panel without a "Build:" line is an upstream or Community build.
 
 The plugin running in Figma must be the dev plugin linked from this checkout's `src/cursor_mcp_plugin/manifest.json`; the Community build answers "Unknown command".
@@ -67,9 +69,9 @@ The plugin running in Figma must be the dev plugin linked from this checkout's `
 ## Setup
 
 1. Run `bun setup` — installs dependencies and writes MCP config for both Cursor (`.cursor/mcp.json`) and Claude Code (`.mcp.json`)
-2. `bun socket` in one terminal (WebSocket relay)
+2. Nothing to start: the relay comes up on the first Figma command
 3. In Figma: Plugins → Development → Link existing plugin → select `src/cursor_mcp_plugin/manifest.json`
-4. Run plugin in Figma, join a channel, then use tools from Cursor or Claude Code
+4. Run the plugin in Figma (it connects by itself), then use the tools from any MCP client
 
 The MCP config written by `bun setup` uses the published package:
 

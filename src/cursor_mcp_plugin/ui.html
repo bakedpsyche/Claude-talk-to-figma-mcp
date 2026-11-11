@@ -257,8 +257,8 @@
     <div class="container">
       <div class="header">
         <div class="header-text">
-          <h1>Talk To Figma MCP Plugin</h1>
-          <p>Connect Figma to Cursor AI using MCP</p>
+          <h1>LLM Figma MCP</h1>
+          <p>Connect Figma to your AI assistant using MCP</p>
           <p id="plugin-version">Build: unknown (old build, no version)</p>
         </div>
       </div>
@@ -289,33 +289,10 @@
           </div>
         </div>
 
-        <div id="connection-status" class="status disconnected">
-          Not connected to Cursor MCP server
+        <div id="connection-status" class="status info">
+          Waiting for your AI assistant. This connects by itself when it first uses Figma.
         </div>
 
-        <div id="mcp-config" class="section hidden">
-          <h2>MCP Configuration</h2>
-          <p>
-            Copy this configuration to your <code>mcp.json</code> file in
-            Cursor:
-          </p>
-          <textarea
-            id="mcp-json"
-            rows="5"
-            readonly
-            style="
-              width: 100%;
-              background: #2d2d2d;
-              color: #e0e0e0;
-              padding: 12px;
-              border: 1px solid #444444;
-              border-radius: 4px;
-              font-family: monospace;
-              margin-bottom: 8px;
-            "
-          ></textarea>
-          <button id="btn-copy" class="secondary">Copy to Clipboard</button>
-        </div>
 
         <!-- Add Progress Bar Section -->
         <div id="progress-container" class="section hidden">
@@ -358,11 +335,11 @@
         <div class="section">
           <h2>About Talk To Figma Plugin</h2>
           <p>
-            This plugin allows Cursor AI to communicate with Figma, enabling
+            This plugin lets an AI assistant work in Figma through MCP, enabling
             AI-assisted design operations.
             <a
               class="link"
-              onclick="window.open(`https://github.com/grab/cursor-talk-to-figma-mcp`, '_blank')"
+              onclick="window.open(`https://github.com/bakedpsyche/Claude-talk-to-figma-mcp`, '_blank')"
               >Github</a
             >
           </p>
@@ -370,13 +347,10 @@
 
           <h2>How to Use</h2>
           <ol>
-            <li>Make sure the MCP server is running in Cursor</li>
-            <li>Connect to the server using the port number (default: 3055)</li>
-            <li>Once connected, you can interact with Figma through Cursor</li>
+            <li>Keep this plugin open in the one Figma file you want to work on</li>
+            <li>Ask your AI assistant to do something in Figma</li>
+            <li>The plugin connects by itself on port 3055</li>
           </ol>
-          <p style="font-size: 11px; color: #888; margin-top: 16px;">
-            Anonymous usage analytics (plugin opens, command names, success/error) are sent to Google Analytics to help improve the plugin. No file content or personal data is collected.
-          </p>
         </div>
       </div>
     </div>
@@ -389,80 +363,14 @@
         serverPort: 3055,
         pendingRequests: new Map(),
         channel: null,
-        commandTracking: new Map(),
+        autoConnect: true,
+        retryTimer: null,
       };
 
-      // --- Anonymous analytics (GA4 Measurement Protocol) ---
-      const analytics = (() => {
-        const MEASUREMENT_ID = "G-9YH0ER9BXC";
-        const API_SECRET = "Xqiy0AtbQt-Xbx4bdoc8Kw";
-        // Set ?_dbg=1 on the parent URL or window.__ANALYTICS_DEBUG__ = true
-        // to route events through GA4 DebugView and log validation errors.
-        const DEBUG = window.__ANALYTICS_DEBUG__ === true;
-        const HOST = "https://www.google-analytics.com";
-        const PATH = DEBUG ? "/debug/mp/collect" : "/mp/collect";
-        const ENDPOINT =
-          HOST +
-          PATH +
-          "?measurement_id=" +
-          MEASUREMENT_ID +
-          "&api_secret=" +
-          API_SECRET;
-        const sessionId = Date.now().toString();
-        const sessionStart = Date.now();
-        let clientId = null;
-        const queue = [];
+      const WAITING_MESSAGE =
+        "Waiting for your AI assistant. This connects by itself when it first uses Figma.";
+      const RETRY_MS = 2000;
 
-        function send(name, params) {
-          const eventParams = Object.assign(
-            {
-              session_id: sessionId,
-              engagement_time_msec: Math.max(100, Date.now() - sessionStart),
-            },
-            params || {}
-          );
-          if (DEBUG) eventParams.debug_mode = 1;
-          const body = {
-            client_id: clientId,
-            events: [{ name, params: eventParams }],
-          };
-          try {
-            const req = fetch(ENDPOINT, {
-              method: "POST",
-              body: JSON.stringify(body),
-              keepalive: true,
-            });
-            if (DEBUG) {
-              req
-                .then((r) => r.json())
-                .then((j) => console.log("[analytics debug]", name, j))
-                .catch((e) => console.warn("[analytics debug] error", e));
-            } else {
-              req.catch(() => {});
-            }
-          } catch (e) {
-            // analytics must never break the plugin
-          }
-        }
-
-        return {
-          track(event, params) {
-            if (!clientId) {
-              queue.push([event, params]);
-              return;
-            }
-            send(event, params);
-          },
-          setClientId(id) {
-            clientId = id;
-            while (queue.length) {
-              const [e, p] = queue.shift();
-              send(e, p);
-            }
-          },
-        };
-      })();
-      analytics.track("plugin_open");
 
       // UI Elements
       const portInput = document.getElementById("port");
@@ -487,13 +395,8 @@
         let statusMessage =
           message ||
           (isConnected
-            ? "Connected to Cursor MCP server"
-            : "Not connected to Cursor MCP server");
-
-        // Add instructions for localhost when disconnected
-        if (!isConnected) {
-          statusMessage += `<br><br>Run this in your terminal, then connect<br><code>bunx cursor-talk-to-figma-socket</code>`;
-        }
+            ? "Connected to your AI assistant"
+            : WAITING_MESSAGE);
 
         connectionStatus.innerHTML = statusMessage;
         connectionStatus.className = `status ${
@@ -504,15 +407,22 @@
         connectButton.textContent = isConnected ? "Disconnect" : "Connect";
         connectButton.className = isConnected ? "secondary" : "primary";
         portInput.disabled = isConnected;
+      }
 
-        // Show/hide MCP config section
-        const mcpConfig = document.getElementById("mcp-config");
-        mcpConfig.className = `section ${isConnected ? "" : "hidden"}`;
+      // Fork: keep trying while the panel is open, so no click is needed
+      function scheduleReconnect() {
+        if (!state.autoConnect || state.connected || state.retryTimer) return;
+        state.retryTimer = setTimeout(() => {
+          state.retryTimer = null;
+          if (state.autoConnect && !state.connected && !state.socket) {
+            connectToServer(parseInt(portInput.value, 10) || 3055);
+          }
+        }, RETRY_MS);
+      }
 
-        // Update MCP config text when showing
-        if (isConnected) {
-          updateMcpConfig();
-        }
+      function cancelReconnect() {
+        if (state.retryTimer) clearTimeout(state.retryTimer);
+        state.retryTimer = null;
       }
 
       // Connect to WebSocket server
@@ -558,17 +468,13 @@
                     true,
                     `Connected to server in channel: <strong>${channelName}</strong>`
                   );
-                  analytics.track("channel_join", {
-                    port: state.serverPort,
-                    channel: channelName,
-                  });
 
                   // Notify the plugin code
                   parent.postMessage(
                     {
                       pluginMessage: {
                         type: "notify",
-                        message: `Connected to Cursor MCP server on port ${port} in channel: ${channelName}`,
+                        message: `Connected on port ${port} in channel: ${channelName}`,
                       },
                     },
                     "*"
@@ -589,12 +495,17 @@
           state.socket.onclose = () => {
             state.connected = false;
             state.socket = null;
-            updateConnectionStatus(false, "Disconnected from server");
+            if (state.autoConnect) {
+              updateConnectionStatus(false, WAITING_MESSAGE);
+              connectionStatus.className = "status info";
+              scheduleReconnect();
+            } else {
+              updateConnectionStatus(false, "Disconnected from server");
+            }
           };
 
           state.socket.onerror = (error) => {
             console.error("WebSocket error:", error);
-            updateConnectionStatus(false, "Connection error");
             state.connected = false;
             state.socket = null;
           };
@@ -639,10 +550,6 @@
         if (data.command) {
           try {
             state.activeRequestId = data.id;
-            state.commandTracking.set(data.id, {
-              command: data.command,
-              startedAt: Date.now(),
-            });
 
             // Send the command to the plugin code
             parent.postMessage(
@@ -664,21 +571,6 @@
             );
           }
         }
-      }
-
-      function trackCommandResult(id, success, errorMessage) {
-        const meta = state.commandTracking.get(id);
-        if (!meta) return;
-        state.commandTracking.delete(id);
-        const params = {
-          command_name: String(meta.command || "unknown"),
-          success: success ? 1 : 0,
-          duration_ms: Date.now() - meta.startedAt,
-        };
-        if (!success && errorMessage) {
-          params.error_message = String(errorMessage).slice(0, 100);
-        }
-        analytics.track("command_executed", params);
       }
 
       // Send a command to the WebSocket server
@@ -791,11 +683,15 @@
 
       // Replace the separate connect/disconnect button listeners with a single toggle
       connectButton.addEventListener("click", () => {
+        cancelReconnect();
         if (state.connected) {
+          state.autoConnect = false;
           updateConnectionStatus(false, "Disconnecting...");
           connectionStatus.className = "status info";
           disconnectFromServer();
         } else {
+          state.autoConnect = true;
+          if (state.socket) return;
           const port = parseInt(portInput.value, 10) || 3055;
           updateConnectionStatus(false, "Connecting...");
           connectionStatus.className = "status info";
@@ -899,12 +795,10 @@
           case "command-result":
             // Forward the result from plugin code back to WebSocket
             sendSuccessResponse(message.id, message.result);
-            trackCommandResult(message.id, true);
             break;
           case "command-error":
             // Forward the error from plugin code back to WebSocket
             sendErrorResponse(message.id, message.error);
-            trackCommandResult(message.id, false, message.error);
             break;
           case "command_progress":
             // Update UI with progress information
@@ -912,41 +806,12 @@
             // Forward progress update to server
             sendProgressUpdateToServer(message);
             break;
-          case "analytics-client-id":
-            analytics.setClientId(message.clientId);
-            break;
         }
       };
 
-      // Add this to the script section, after all the other event listeners
-      document.getElementById("btn-copy").addEventListener("click", () => {
-        const textarea = document.getElementById("mcp-json");
-        textarea.select();
-        document.execCommand("copy");
-        const button = document.getElementById("btn-copy");
-        button.textContent = "Copied!";
-        setTimeout(() => {
-          button.textContent = "Copy to Clipboard";
-        }, 2000);
-      });
 
-      // Add this function to the script section
-      function updateMcpConfig() {
-        const mcpConfig = {
-          mcpServers: {
-            TalkToFigma: {
-              command: "bunx",
-              args: ["cursor-talk-to-figma-mcp@latest"],
-            },
-          },
-        };
-
-        document.getElementById("mcp-json").value = JSON.stringify(
-          mcpConfig,
-          null,
-          2
-        );
-      }
+      // Fork: connect as soon as the panel opens
+      connectToServer(parseInt(portInput.value, 10) || 3055);
     </script>
   </body>
 </html>
